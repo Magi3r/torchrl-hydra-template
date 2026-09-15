@@ -88,6 +88,12 @@ class DreamerV3(nn.Module):
         # Phase 1: subclass builds its extra components (decoder / projector / prototypes)
         self._init_extra(config, shapes)
 
+        # NHWC conv weights, once, for every conv the model owns (decoder and
+        # DreamerPro's EMA encoder included). Must precede clone_and_freeze:
+        # `.to()` rebinds `param.data`, which would break its storage sharing.
+        if perf.channels_last:
+            self.to(memory_format=torch.channels_last)
+
         # Phase 2: collect everything into one shared optimiser
         modules = self._build_module_dict()
         for key, module in modules.items():

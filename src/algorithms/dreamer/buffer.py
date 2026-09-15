@@ -26,8 +26,8 @@ class Buffer:
         #! trained on immediately at least once.
         self.online = bool(getattr(config, "online", True))
         #! Pinned (page-locked) staging for the CPU->GPU copy of a sampled batch.
-        #! On by default (the published configuration); set false to measure what
-        #! the transfer costs without it.
+        #! On by default: r2dreamer pins whenever replay lives on the CPU. Set
+        #! false to measure what the transfer costs without it.
         self.pin_memory = bool(getattr(config, "pin_memory", True))
         self._seq_len = self.batch_length + 1
         self._online_queue: deque[tuple[int, int]] = deque()  # (per-env start step, env)

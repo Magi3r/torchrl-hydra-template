@@ -71,9 +71,14 @@ whose annealed discount and horizon would otherwise force a recompile on every
 gradient step.
 DreamerV3's speed knobs default to NM512/r2dreamer's settings, the upstream
 this port is based on: `dreamer_config.compile`, `perf.tf32`, `perf.amp: fp16`
-(autocast + `GradScaler`) and `buffer_config.pin_memory` are on; this port's
-own additions (`perf.static_pad`, `perf.dedup_value`, `perf.cudnn_benchmark`,
-`perf.foreach_laprop`) are off. Keep `PerfFlags` in `perf_flags.py` in sync
+(autocast + `GradScaler`), `buffer_config.pin_memory` and `perf.channels_last`
+are on; this port's own additions (`perf.static_pad`, `perf.dedup_value`,
+`perf.cudnn_benchmark`, `perf.foreach_laprop`) are off. `channels_last` is on
+for parity — r2dreamer's input permute already ran every conv activation NHWC,
+while this port's NCHW TorchRL input would leave the first encoder conv NCHW —
+and mirrors BBF's knob: NHWC conv weights (converted once in
+`DreamerV3.__init__`, before `clone_and_freeze` aliases parameter storage) plus
+an NHWC encoder input. Keep `PerfFlags` in `perf_flags.py` in sync
 with `configs/algorithm/dreamer.yaml`.
 
 ## Design principles
