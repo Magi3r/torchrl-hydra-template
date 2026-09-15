@@ -52,8 +52,10 @@ paper's flagship setting is ``replay_ratio=8``. Note the gin's
 40k gradient steps at any replay ratio — ``reset_interval`` below is in
 gradient steps, so it stays 40_000 for both RR2 and RR8.
 """
+
 from __future__ import annotations
 
+import contextlib
 import math
 from typing import Callable
 
@@ -91,31 +93,31 @@ class BBFAlgorithm(BaseAlgorithm):
         weight_decay: float = 0.1,
         adam_eps: float = 1.5e-4,
         batch_size: int = 32,
-        max_grad_norm: float | None = None,   # official BBF does not clip
+        max_grad_norm: float | None = None,  # official BBF does not clip
         # --- Update rule -----------------------------------------------------
-        replay_ratio: float = 2,              # gradient steps per env step (paper: 8)
+        replay_ratio: float = 2,  # gradient steps per env step (paper: 8)
         max_update_horizon: int = 10,
         min_update_horizon: int = 3,
         min_gamma: float = 0.97,
         max_gamma: float = 0.997,
-        cycle_steps: int = 10_000,            # anneal window after each reset (grad steps)
+        cycle_steps: int = 10_000,  # anneal window after each reset (grad steps)
         double_dqn: bool = True,
         dueling: bool = True,
         # --- SPR auxiliary loss ----------------------------------------------
-        spr_weight: float = 5.0,              # 0 disables SPR
-        spr_depth: int = 5,                   # prediction horizon k
+        spr_weight: float = 5.0,  # 0 disables SPR
+        spr_depth: int = 5,  # prediction horizon k
         # --- Resets (shrink-and-perturb) --------------------------------------
-        reset_interval: int = 40_000,         # grad steps (paper: 40k at any RR); 0 disables
-        shrink_factor: float = 0.5,           # keep 50% of encoder/transition weights
+        reset_interval: int = 40_000,  # grad steps (paper: 40k at any RR); 0 disables
+        shrink_factor: float = 0.5,  # keep 50% of encoder/transition weights
         perturb_factor: float = 0.5,
-        no_resets_after: int = 0,             # grad steps; 0 = never stop resetting
+        no_resets_after: int = 0,  # grad steps; 0 = never stop resetting
         # --- Target network ----------------------------------------------------
-        target_tau: float = 0.005,            # EMA per gradient step
+        target_tau: float = 0.005,  # EMA per gradient step
         # --- Replay -------------------------------------------------------------
-        replay_capacity: int = 105_000,       # >= total env steps: ring never wraps
+        replay_capacity: int = 105_000,  # >= total env steps: ring never wraps
         prioritized: bool = True,
-        prb_alpha: float = 0.5,               # sampling prop. to loss**alpha
-        prb_beta: float = 0.5,                # importance-sampling exponent
+        prb_alpha: float = 0.5,  # sampling prop. to loss**alpha
+        prb_beta: float = 0.5,  # importance-sampling exponent
         # --- Augmentation --------------------------------------------------------
         data_augmentation: bool = True,
         aug_pad: int = 4,
@@ -125,10 +127,19 @@ class BBFAlgorithm(BaseAlgorithm):
         eps_end: float = 0.0,
         eps_annealing_frames: int = 2_001,
         eps_eval: float = 0.001,
-        min_replay_history: int = 2_000,      # env steps before learning starts
+        min_replay_history: int = 2_000,  # env steps before learning starts
         frames_per_batch: int = 1,
         max_frames_per_traj: int = -1,
         renormalize_latent: bool = True,
+        # --- Runtime tweaks -------------------------------------------------
+        # All off by default: BBF's published configuration enables none of
+        # them, so the defaults here *are* the paper's configuration and no
+        # existing run changes. Each is a knob for measurement.
+        compile: bool = False,  # torch.compile the learner's network calls
+        amp: bool = False,  # autocast(bfloat16) on the gradient step
+        channels_last: bool = False,  # NHWC activations for the conv stack
+        pin_memory: bool = False,  # pinned host staging + async H2D of a sample
+        storage_device: str = "cpu",  # replay storage device; "cuda" keeps it resident
     ) -> None:
         super().__init__(device)
         self.obs_key = obs_key
@@ -172,6 +183,21 @@ class BBFAlgorithm(BaseAlgorithm):
         self.frames_per_batch = frames_per_batch
         self.max_frames_per_traj = max_frames_per_traj
         self.renormalize_latent = renormalize_latent
+        self.compile = compile
+        self.amp = amp
+        self.channels_last = channels_last
+        self.pin_memory = pin_memory
+        self.storage_device = storage_device
+
+        if pin_memory and storage_device != "cpu":
+            # Pinning is a property of *host* memory; there is no page-locked
+            # staging buffer to allocate for a store that already lives on the
+            # device. Failing here beats silently measuring one tweak while the
+            # table says two.
+            raise ValueError(
+                "pin_memory=True requires storage_device='cpu' "
+                f"(got storage_device={storage_device!r})"
+            )
 
         # window sampled from the buffer: enough to cover the largest n-step
         # horizon *and* the SPR rollout. slice_len = window + 1 frames.
@@ -237,8 +263,78 @@ class BBFAlgorithm(BaseAlgorithm):
             self.q_actor, FixedEpsilonGreedy(action_spec, self.eps_eval)
         )
 
+        self._store_device = self._resolved_storage_device()
+
+        if self.channels_last:
+            # NHWC weights for the Impala conv stack. Applied to both networks
+            # so the EMA target and the online net agree on layout; the
+            # activations are converted in `_augment`, the one place every
+            # 4-D pixel batch passes through.
+            self.network.to(memory_format=torch.channels_last)
+            self.target_network.to(memory_format=torch.channels_last)
+
+        self._compile_network_calls()
+
         self.replay_buffer = self._make_replay_buffer(self.window)
         self.optimizer = self._make_optimizer()
+
+    def _resolved_storage_device(self) -> torch.device:
+        """Where the replay storage lives. ``"cuda"`` follows the trainer's card."""
+        if self.storage_device == "cuda":
+            return self.device
+        return torch.device(self.storage_device)
+
+    def _compile_network_calls(self) -> None:
+        """Compile the network entry points the learner uses, in place.
+
+        Compilation is applied to the *network* calls rather than to
+        ``_update`` as a whole, and that is deliberate. ``_update`` reads two
+        values that change on almost every gradient step: the annealed discount
+        ``_current_gamma()`` (a fresh Python float) and the annealed horizon
+        ``_current_horizon()`` (an int that indexes ``obs[:, n]``). Dynamo
+        guards on both, so compiling the outer function recompiles it
+        continuously -- the row would measure the compiler rather than the
+        tweak. Every call wrapped here takes tensors of fixed shape.
+
+        The compiled callables are bound methods stored as *instance
+        attributes*, which keeps two things working that matter:
+        ``named_parameters()`` prefixes stay ``encoder.`` / ``transition_model.``
+        (``_shrink_and_perturb`` selects on them, and wrapping the submodule
+        object instead would rename them to ``transition_model._orig_mod.``),
+        and ``state_dict()`` is unchanged, so checkpoints stay compatible with
+        an uncompiled run.
+
+        The collector's policy is left eager on purpose: it runs at batch size
+        1 against the target network, where there is nothing to fuse and a
+        recompile would cost more than the launches it saves.
+
+        Default mode, not ``reduce-overhead``: the latter captures CUDA graphs
+        against a fixed memory pool, and ``_shrink_and_perturb`` rewrites every
+        parameter and rebuilds the optimiser every ``reset_interval`` gradient
+        steps. Graph capture is a separate tweak from graph compilation, and
+        pairing it with periodic resets is not something this knob should
+        decide silently.
+        """
+        if not self.compile:
+            return
+        for net in (self.network, self.target_network):
+            for name in ("forward", "encode", "project", "predict", "q_logits"):
+                setattr(net, name, torch.compile(getattr(net, name)))
+            transition = net.transition_model
+            transition.forward = torch.compile(transition.forward)
+
+    def _autocast(self):
+        """bf16 autocast for the gradient step, or a no-op.
+
+        Unlike DreamerV3 -- whose norms are *constructed* in bf16, so its `amp`
+        knob also changes what the learner computes -- BBF is fp32 throughout
+        and this is a pure wrapper: autocast keeps ``softmax`` / ``log_softmax``
+        in fp32, so the C51 projection and the cross-entropy are unaffected.
+        The row therefore carries no dagger in the paper's ablation figure.
+        """
+        if self.amp and self.device is not None and self.device.type == "cuda":
+            return torch.autocast("cuda", dtype=torch.bfloat16)
+        return contextlib.nullcontext()
 
     def _make_replay_buffer(self, window: int) -> TensorDictReplayBuffer:
         """Prioritized (or uniform) contiguous-window buffer.
@@ -249,7 +345,7 @@ class BBFAlgorithm(BaseAlgorithm):
         so a window never straddles the write head.
         """
         slice_len = window + 1
-        storage = LazyTensorStorage(self.replay_capacity, device="cpu")
+        storage = LazyTensorStorage(self.replay_capacity, device=self._store_device)
         if self.prioritized:
             sampler = PrioritizedSliceSampler(
                 max_capacity=self.replay_capacity,
@@ -260,8 +356,18 @@ class BBFAlgorithm(BaseAlgorithm):
                 strict_length=True,
             )
         else:
-            sampler = SliceSampler(slice_len=slice_len, traj_key="traj", strict_length=True)
-        return TensorDictReplayBuffer(storage=storage, sampler=sampler, batch_size=None)
+            sampler = SliceSampler(
+                slice_len=slice_len, traj_key="traj", strict_length=True
+            )
+        # `pin_memory` page-locks the *sampled* batch before it is handed
+        # back, which is what lets `_sample`'s copy be a non-blocking DMA that
+        # overlaps with compute instead of a synchronous pageable copy.
+        return TensorDictReplayBuffer(
+            storage=storage,
+            sampler=sampler,
+            batch_size=None,
+            pin_memory=self.pin_memory,
+        )
 
     def _make_optimizer(self) -> torch.optim.AdamW:
         decay, no_decay = [], []
@@ -357,7 +463,9 @@ class BBFAlgorithm(BaseAlgorithm):
             if (
                 self.reset_interval > 0
                 and self._steps_since_reset > self.reset_interval
-                and (self.no_resets_after == 0 or self._grad_steps < self.no_resets_after)
+                and (
+                    self.no_resets_after == 0 or self._grad_steps < self.no_resets_after
+                )
             ):
                 self._shrink_and_perturb()
             rl_loss, spr_loss = self._update()
@@ -380,23 +488,29 @@ class BBFAlgorithm(BaseAlgorithm):
         transitions (uint8 frame stacks + integer action + reward + cut)."""
         flat = batch.reshape(-1)
         n = flat.numel()
+        # The collector hands the batch over on the training device. Move it to
+        # wherever the storage lives rather than unconditionally to the host:
+        # under `storage_device="cuda"` a `.cpu()` here would add a D2H copy on
+        # the way in and an H2D copy on the way out, and the GPU-resident-replay
+        # row would measure that round trip instead of the tweak.
+        device = self._store_device
         pixels = flat[self.obs_key]
-        obs_u8 = (pixels * 255.0).round_().clamp_(0, 255).to(torch.uint8).cpu()
+        obs_u8 = (pixels * 255.0).round_().clamp_(0, 255).to(torch.uint8).to(device)
         action = flat["action"]
         if action.dim() > 1:  # one-hot action encoding -> integer index
             action = action.argmax(-1)
-        action = action.reshape(n).long().cpu()
-        reward = flat[("next", "reward")].reshape(n).float().cpu()
+        action = action.reshape(n).long().to(device)
+        reward = flat[("next", "reward")].reshape(n).float().to(device)
         done = flat[("next", "done")].reshape(n).bool()
         terminated = flat.get(("next", "terminated"), default=done).reshape(n).bool()
-        cut = (terminated | done).cpu()
+        cut = (terminated | done).to(device)
         transitions = TensorDict(
             {
                 "pixels": obs_u8,
                 "action": action,
                 "reward": reward,
                 "cut": cut,
-                "traj": torch.zeros(n, dtype=torch.long),
+                "traj": torch.zeros(n, dtype=torch.long, device=device),
             },
             batch_size=[n],
         )
@@ -405,8 +519,13 @@ class BBFAlgorithm(BaseAlgorithm):
     def _sample(self) -> dict[str, torch.Tensor]:
         """Sample ``batch_size`` contiguous windows and unpack to (B, ...)."""
         sl = self.window + 1
-        sample = self.replay_buffer.sample(self.batch_size * sl).reshape(self.batch_size, sl)
-        sample = sample.to(self.device)
+        sample = self.replay_buffer.sample(self.batch_size * sl).reshape(
+            self.batch_size, sl
+        )
+        # `non_blocking` is only honoured out of page-locked memory, and only
+        # buys anything when there is host->device work to overlap: it is a
+        # no-op when the storage is already device-resident.
+        sample = sample.to(self.device, non_blocking=self.pin_memory)
         if self.prioritized:
             w = sample.get("priority_weight")[:, 0].float()
             weights = w / w.max().clamp_min(1e-8)
@@ -416,12 +535,12 @@ class BBFAlgorithm(BaseAlgorithm):
             weights = torch.ones(self.batch_size, device=self.device)
             start_idx = None
         return {
-            "obs": sample.get("pixels").float() / 255.0,   # (B, window+1, C, H, W)
-            "action": sample.get("action"),                # (B, window+1)
-            "reward": sample.get("reward"),                # (B, window+1)
-            "cut": sample.get("cut"),                       # (B, window+1)
-            "weights": weights,                             # (B,)
-            "start_idx": start_idx,                         # (B,) storage indices or None
+            "obs": sample.get("pixels").float() / 255.0,  # (B, window+1, C, H, W)
+            "action": sample.get("action"),  # (B, window+1)
+            "reward": sample.get("reward"),  # (B, window+1)
+            "cut": sample.get("cut"),  # (B, window+1)
+            "weights": weights,  # (B,)
+            "start_idx": start_idx,  # (B,) storage indices or None
         }
 
     def _update(self) -> tuple[float, float]:
@@ -432,58 +551,64 @@ class BBFAlgorithm(BaseAlgorithm):
         b = sample["action"].shape[0]
         arange = torch.arange(b, device=self.device)
 
-        obs = sample["obs"]                                # (B, window+1, C, H, W)
-        obs_t = self._augment(obs[:, 0])
-        returns, bootstrap, alive = _masked_nstep_return(
-            sample["reward"], sample["cut"], gamma, n
-        )
-
-        # --- C51 target: project n-step Bellman backup onto the support ----
-        with torch.no_grad():
-            obs_tn = self._augment(obs[:, n])
-            target_probs = F.softmax(
-                self.target_network.q_logits(self.target_network.encode(obs_tn)), -1
-            )                                                          # (B, A, atoms)
-            if self.double_dqn:
-                next_q = self.network(obs_tn)                          # online net
-            else:
-                next_q = (target_probs * self.support).sum(-1)
-            a_star = next_q.argmax(-1)
-            next_dist = target_probs[arange, a_star]                   # (B, atoms)
-            target_dist = _project_distribution(
-                next_dist, returns, bootstrap, self.support, gamma**n
+        # bf16 autocast wraps the forward and the loss only; the backward
+        # follows the dtypes autograd recorded, and bf16 needs no loss
+        # scaling. `_autocast()` is a no-op unless `amp` is on.
+        with self._autocast():
+            obs = sample["obs"]  # (B, window+1, C, H, W)
+            obs_t = self._augment(obs[:, 0])
+            returns, bootstrap, alive = _masked_nstep_return(
+                sample["reward"], sample["cut"], gamma, n
             )
 
-        # --- Online distribution at (s_t, a_t) ------------------------------
-        latent_t = self.network.encode(obs_t)
-        logits_t = self.network.q_logits(latent_t)                     # (B, A, atoms)
-        log_p = F.log_softmax(logits_t[arange, sample["action"][:, 0]], -1)
-        rl_loss_elem = -(target_dist * log_p).sum(-1)                  # (B,)
-
-        # --- SPR: predict own future latents through the transition model ---
-        if self.spr_weight > 0:
-            k = self.spr_depth
+            # --- C51 target: project n-step Bellman backup onto the support ----
             with torch.no_grad():
-                future = obs[:, 1 : k + 1].reshape(-1, *obs.shape[2:])
-                future = self._augment(future)
-                spr_targets = self.target_network.project(
-                    self.target_network.encode(future)
-                ).view(b, k, -1)
-                spr_targets = F.normalize(spr_targets, dim=-1)
-            z_hat = latent_t
-            predictions = []
-            for j in range(k):
-                z_hat = self.network.transition_model(z_hat, sample["action"][:, j])
-                predictions.append(self.network.predict(self.network.project(z_hat)))
-            spr_pred = F.normalize(torch.stack(predictions, 1), dim=-1)
-            per_jump = ((spr_pred - spr_targets) ** 2).sum(-1)         # 2 - 2 cos
-            spr_loss_elem = (per_jump * alive[:, :k]).mean(dim=1)      # (B,)
-        else:
-            spr_loss_elem = torch.zeros_like(rl_loss_elem)
+                obs_tn = self._augment(obs[:, n])
+                target_probs = F.softmax(
+                    self.target_network.q_logits(self.target_network.encode(obs_tn)), -1
+                )  # (B, A, atoms)
+                if self.double_dqn:
+                    next_q = self.network(obs_tn)  # online net
+                else:
+                    next_q = (target_probs * self.support).sum(-1)
+                a_star = next_q.argmax(-1)
+                next_dist = target_probs[arange, a_star]  # (B, atoms)
+                target_dist = _project_distribution(
+                    next_dist, returns, bootstrap, self.support, gamma**n
+                )
 
-        loss = (
-            sample["weights"] * (rl_loss_elem + self.spr_weight * spr_loss_elem)
-        ).mean()
+            # --- Online distribution at (s_t, a_t) ------------------------------
+            latent_t = self.network.encode(obs_t)
+            logits_t = self.network.q_logits(latent_t)  # (B, A, atoms)
+            log_p = F.log_softmax(logits_t[arange, sample["action"][:, 0]], -1)
+            rl_loss_elem = -(target_dist * log_p).sum(-1)  # (B,)
+
+            # --- SPR: predict own future latents through the transition model ---
+            if self.spr_weight > 0:
+                k = self.spr_depth
+                with torch.no_grad():
+                    future = obs[:, 1 : k + 1].reshape(-1, *obs.shape[2:])
+                    future = self._augment(future)
+                    spr_targets = self.target_network.project(
+                        self.target_network.encode(future)
+                    ).view(b, k, -1)
+                    spr_targets = F.normalize(spr_targets, dim=-1)
+                z_hat = latent_t
+                predictions = []
+                for j in range(k):
+                    z_hat = self.network.transition_model(z_hat, sample["action"][:, j])
+                    predictions.append(
+                        self.network.predict(self.network.project(z_hat))
+                    )
+                spr_pred = F.normalize(torch.stack(predictions, 1), dim=-1)
+                per_jump = ((spr_pred - spr_targets) ** 2).sum(-1)  # 2 - 2 cos
+                spr_loss_elem = (per_jump * alive[:, :k]).mean(dim=1)  # (B,)
+            else:
+                spr_loss_elem = torch.zeros_like(rl_loss_elem)
+
+            loss = (
+                sample["weights"] * (rl_loss_elem + self.spr_weight * spr_loss_elem)
+            ).mean()
 
         self.optimizer.zero_grad()
         loss.backward()
@@ -494,8 +619,11 @@ class BBFAlgorithm(BaseAlgorithm):
         if self.prioritized:
             # Key the window's priority on its start transition (C51 loss);
             # sampling is prop. to loss**alpha via the sum-tree.
+            # `.float()` is not redundant under `amp`: autocast keeps
+            # `log_softmax` in fp32 today, but the sum-tree must never be fed
+            # bf16 priorities if that ever changes.
             self.replay_buffer.update_priority(
-                sample["start_idx"], rl_loss_elem.detach().cpu() + 1e-10
+                sample["start_idx"], rl_loss_elem.detach().float().cpu() + 1e-10
             )
         self._ema_update_target()
         return (
@@ -508,14 +636,22 @@ class BBFAlgorithm(BaseAlgorithm):
     # ------------------------------------------------------------------
 
     def _augment(self, x: torch.Tensor) -> torch.Tensor:
-        """DrQ-style random shift (pad+crop) plus intensity jitter."""
-        if not self.data_augmentation:
-            return x
-        x = _random_shift(x, self.aug_pad)
-        noise = 1.0 + self.intensity_scale * torch.randn(
-            x.shape[0], 1, 1, 1, device=x.device
-        ).clamp_(-2.0, 2.0)
-        return x * noise
+        """DrQ-style random shift (pad+crop) plus intensity jitter.
+
+        Also the one place every 4-D pixel batch the learner sees passes
+        through, so it is where the channels-last conversion goes -- the
+        sampled observation is 5-D ``(B, window+1, C, H, W)`` and NHWC is a
+        4-D layout, so it cannot be set at the buffer.
+        """
+        if self.data_augmentation:
+            x = _random_shift(x, self.aug_pad)
+            noise = 1.0 + self.intensity_scale * torch.randn(
+                x.shape[0], 1, 1, 1, device=x.device
+            ).clamp_(-2.0, 2.0)
+            x = x * noise
+        if self.channels_last:
+            x = x.contiguous(memory_format=torch.channels_last)
+        return x
 
     @torch.no_grad()
     def _ema_update_target(self) -> None:
@@ -622,8 +758,12 @@ def _random_shift(x: torch.Tensor, pad: int) -> torch.Tensor:
     b, _, h, w = x.shape
     x_pad = F.pad(x, (pad, pad, pad, pad), mode="replicate")
     offsets = torch.randint(0, 2 * pad + 1, (b, 2), device=x.device).float()
-    ys = torch.arange(h, device=x.device).float().view(1, h, 1) + offsets[:, 0].view(b, 1, 1)
-    xs = torch.arange(w, device=x.device).float().view(1, 1, w) + offsets[:, 1].view(b, 1, 1)
+    ys = torch.arange(h, device=x.device).float().view(1, h, 1) + offsets[:, 0].view(
+        b, 1, 1
+    )
+    xs = torch.arange(w, device=x.device).float().view(1, 1, w) + offsets[:, 1].view(
+        b, 1, 1
+    )
     gy = (2.0 * ys + 1.0) / (h + 2 * pad) - 1.0
     gx = (2.0 * xs + 1.0) / (w + 2 * pad) - 1.0
     grid = torch.stack([gx.expand(b, h, w), gy.expand(b, h, w)], dim=-1)
@@ -670,7 +810,7 @@ def _project_distribution(
 
     tz = returns.unsqueeze(1) + gamma_n * bootstrap.unsqueeze(1) * support.unsqueeze(0)
     tz = tz.clamp(v_min, v_max)
-    pos = (tz - v_min) / delta                       # fractional atom index
+    pos = (tz - v_min) / delta  # fractional atom index
     lower = pos.floor().long().clamp(0, num_atoms - 1)
     upper = pos.ceil().long().clamp(0, num_atoms - 1)
     lower_weight = (upper.float() - pos).where(lower != upper, torch.ones_like(pos))

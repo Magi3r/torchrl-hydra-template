@@ -63,7 +63,18 @@ BBF (`algorithm=bbf`) builds on the same Atari-100k stack but subclasses
 `PrioritizedSliceSampler` for contiguous-window sampling (n-step computed at
 sample time), adding SPR self-prediction, an Impala-CNN ×4 encoder, periodic
 shrink-and-perturb resets, annealed n-step/discount, DrQ augmentation and an EMA
-target. It requires `trainer.num_envs=1` (a single contiguous stream).
+target. It requires `trainer.num_envs=1` (a single contiguous stream). Its
+runtime knobs -- `compile`, `amp`, `channels_last`, `pin_memory` and
+`storage_device` -- all default to off, so the defaults are the published
+configuration; `compile` wraps the network entry points rather than `_update`,
+whose annealed discount and horizon would otherwise force a recompile on every
+gradient step.
+DreamerV3's speed knobs default to NM512/r2dreamer's settings, the upstream
+this port is based on: `dreamer_config.compile`, `perf.tf32`, `perf.amp: fp16`
+(autocast + `GradScaler`) and `buffer_config.pin_memory` are on; this port's
+own additions (`perf.static_pad`, `perf.dedup_value`, `perf.cudnn_benchmark`,
+`perf.foreach_laprop`) are off. Keep `PerfFlags` in `perf_flags.py` in sync
+with `configs/algorithm/dreamer.yaml`.
 
 ## Design principles
 

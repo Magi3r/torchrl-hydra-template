@@ -40,7 +40,6 @@ runs:
     label: "torch.compile"
     axis: network
     semantics_preserving: true
-    enabled: false # needs `algorithm.compile`
     experiment: bbf/atari100k
     overrides:
       - exp_name=bbf_ablation_compile
@@ -50,7 +49,6 @@ runs:
     label: "Mixed precision (bf16)"
     axis: network
     semantics_preserving: true
-    enabled: false # needs `algorithm.amp`
     experiment: bbf/atari100k
     overrides:
       - exp_name=bbf_ablation_amp
@@ -60,7 +58,6 @@ runs:
     label: "Channels-last"
     axis: network
     semantics_preserving: true
-    enabled: false # needs `algorithm.channels_last`
     experiment: bbf/atari100k
     overrides:
       - exp_name=bbf_ablation_channels_last
@@ -94,7 +91,6 @@ runs:
     label: "Pinned staging + async H2D"
     axis: data
     semantics_preserving: true
-    enabled: false # needs `algorithm.pin_memory`
     experiment: bbf/atari100k
     overrides:
       - exp_name=bbf_ablation_pin_memory
@@ -104,7 +100,6 @@ runs:
     label: "GPU-resident replay"
     axis: data
     semantics_preserving: true
-    enabled: false # needs `algorithm.storage_device`
     experiment: bbf/atari100k
     overrides:
       - exp_name=bbf_ablation_gpu_replay

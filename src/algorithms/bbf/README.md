@@ -123,12 +123,23 @@ annealed horizon (design choice 4) implementable. `replay_capacity ≥ total env
 head. **Priority semantics:** torchrl reduces a slice's sampling priority over
 the window (`reduction='max'`); we key each window's priority on its *start*
 transition (priority $=$ C51 loss, sampled $\propto \text{loss}^\alpha$).
-- **Our PER is more "real" than the official run's.** In the official release,
-`set_priority` receives the *batch-mean* DQN loss (`aux_losses["DQNLoss"]` is
-a scalar per batch) and `zip`s it against the full index array, so only the
-first `batches_to_group` (= 2) of 64 sampled indices are ever updated; every
-other transition keeps the max-priority it got on insertion. The official
-runs therefore sampled *near-uniformly* despite `replay_scheme='prioritized'`.
+- **Our PER carries per-sample signal; the official run's does not.** In the
+official release (`bbf/agents/spr_agent.py`), the priority handed to the buffer
+is built from `aux_losses["DQNLoss"]`, which is `jnp.mean(dqn_loss)` — one
+scalar per scanned group, so `priorities` has length `batches_to_group` (= 2).
+It is `zip`ped against a flattened index array of `batch_size *
+batches_to_group` (= 64) entries, and
+`bbf/replay_memory/subsequence_replay_buffer.py` does the pairing with a bare
+`for index, priority in zip(indices, priorities)` and no length check, so `zip`
+silently truncates to 2.
+The consequence is not mainly about *coverage*: at replay ratio 2 that is still
+~200k `set` calls into a ~100k-entry buffer over an Atari-100k run, so most
+entries are written eventually. It is about *content*. The value written is a
+batch mean shared by both updated entries, so it carries no information about
+the transition it is assigned to — the sum-tree ends up holding a mixture of
+insertion-time max priorities and a roughly constant number, and none of it
+ranks transitions by TD error. The official runs were therefore prioritized in
+name only, despite `replay_scheme = 'prioritized'` in `configs/BBF.gin`.
 This template implements textbook per-sample PER instead; to reproduce the
 official effective behaviour, run with `algorithm.prioritized=false`.
 - **Life-loss handling.** This template's `EpisodicLifeEnv` flags life loss as
@@ -191,6 +202,29 @@ python src/train.py experiment=bbf/atari100k algorithm.prioritized=false     # u
 python src/train.py experiment=bbf/atari100k \
     algorithm.max_update_horizon=3 algorithm.min_gamma=0.997                  # no annealing
 ```
+
+Runtime switches (each changes how fast the same computation runs, not what is
+computed -- all default to off, so the published configuration is unaffected):
+
+```shell
+python src/train.py experiment=bbf/atari100k algorithm.compile=true
+python src/train.py experiment=bbf/atari100k algorithm.amp=true               # bf16 autocast
+python src/train.py experiment=bbf/atari100k algorithm.channels_last=true     # NHWC convs
+python src/train.py experiment=bbf/atari100k algorithm.pin_memory=true        # pinned + async H2D
+python src/train.py experiment=bbf/atari100k algorithm.storage_device=cuda    # replay on the GPU
+```
+
+`compile` wraps the *network* entry points (`encode`, `project`, `predict`,
+`q_logits`, `forward`, the transition model) rather than `_update` as a whole.
+`_update` reads the annealed discount and horizon on every gradient step, and
+Dynamo guards on both, so compiling the outer function recompiles continuously.
+The collector's policy is left eager: batch size 1 against the target network
+has nothing to fuse.
+
+`storage_device=cuda` is mutually exclusive with `pin_memory` (there is no host
+staging buffer to page-lock) and the constructor rejects the combination. At the
+Atari-100k budget the store is uint8 frame stacks, `105_000 x 4 x 84 x 84 ~ 3.0
+GiB`, so it fits on the device alongside training.
 
 
 
