@@ -12,6 +12,10 @@ defaults:
   - /experiment/dreamer/atari100k
   - _self_
 
+# openrlbenchmark groups runs by (exp_name, env_id), so this variant must not
+# collide with the base experiment.
+exp_name: dreamer_batch32
+
 algorithm:
   buffer_config:
     batch_size: 32

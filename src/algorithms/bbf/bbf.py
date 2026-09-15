@@ -263,8 +263,6 @@ class BBFAlgorithm(BaseAlgorithm):
             self.q_actor, FixedEpsilonGreedy(action_spec, self.eps_eval)
         )
 
-        self._store_device = self._resolved_storage_device()
-
         if self.channels_last:
             # NHWC weights for the Impala conv stack. Applied to both networks
             # so the EMA target and the online net agree on layout; the
@@ -278,8 +276,14 @@ class BBFAlgorithm(BaseAlgorithm):
         self.replay_buffer = self._make_replay_buffer(self.window)
         self.optimizer = self._make_optimizer()
 
-    def _resolved_storage_device(self) -> torch.device:
-        """Where the replay storage lives. ``"cuda"`` follows the trainer's card."""
+    @property
+    def _store_device(self) -> torch.device:
+        """Where the replay storage lives. ``"cuda"`` follows the trainer's card.
+
+        Resolved on access rather than cached in ``setup()``: ``self.device`` is
+        only final once the trainer assigns it, and helpers such as
+        ``_make_replay_buffer`` are also called without ``setup()`` (tests).
+        """
         if self.storage_device == "cuda":
             return self.device
         return torch.device(self.storage_device)

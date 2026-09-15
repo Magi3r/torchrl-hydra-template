@@ -111,7 +111,7 @@ def test_infer_experiment_config_matches_legacy_algorithm_target(registry):
             "_target_": "src.algorithms.dreamer.dreamer.DreamerAlgorithm",  # old path
             "dreamer_config": {"_target_": "src.algorithms.dreamer.model.DreamerV3"},
         },
-        "environment": {"name": "ALE/Hero-v5"},
+        "environment": {"name": "ALE/Jamesbond-v5"},
         "trainer": {"seed": 42, "total_frames": 110_000},
     }
     assert infer_experiment_config(config, registry) == "experiment=dreamer/atari100k"
@@ -125,7 +125,7 @@ def test_infer_experiment_config_dreamer_variant(registry):
             "dreamer_config": {"_target_": "src.algorithms.dreamer.model.R2Dreamer"},
         },
         "environment": {
-            "name": "ALE/Hero-v5",
+            "name": "ALE/Jamesbond-v5",
             "gymnasium_wrappers": [{"_target_": "gymnasium.wrappers.AtariPreprocessing"}],
         },
         "trainer": {"seed": 42, "total_frames": 110_000},
