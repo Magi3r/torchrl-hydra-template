@@ -9,8 +9,9 @@
 
 common:
   tag: bbf-opt
-  # One seed for pure-runtime rows; rows whose claim is about SCORE override
-  # this with [1, 2, 3], as does the baseline they are quoted against.
+  # One seed for pure-runtime rows; rows whose claim is about SCORE (every
+  # `semantics_preserving: false` row) override this with [1, 2, 3, 4, 5], as
+  # does the baseline they are quoted against.
   seeds: [1]
   total_frames: 100_000
   overrides:
@@ -40,6 +41,9 @@ runs:
     label: "torch.compile"
     axis: network
     semantics_preserving: true
+    # Default mode. Compiles the network entry points (forward, encode,
+    # project, predict, q_logits, transition), so acting and the gradient step
+    # both run compiled; the loss/optimiser code around them stays eager.
     experiment: bbf/atari100k
     overrides:
       - exp_name=bbf_ablation_compile
@@ -48,7 +52,11 @@ runs:
   amp:
     label: "Mixed precision (bf16)"
     axis: network
-    semantics_preserving: true
+    seeds: [1, 2, 3, 4, 5]
+    # bf16 autocast changes the numerics of the gradient step, so it is a score
+    # claim too. Same scheme and seeds as dreamer_optimisations_ablation.yaml's
+    # `amp_bf16` row.
+    semantics_preserving: false
     experiment: bbf/atari100k
     overrides:
       - exp_name=bbf_ablation_amp

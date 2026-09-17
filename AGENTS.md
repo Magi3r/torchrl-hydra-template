@@ -691,6 +691,7 @@ python scripts/update_algo_results.py              # refresh algo README benchma
 # to W&B offline and each is uploaded as its cell finishes (runs already marked
 # `.synced` are never re-uploaded). A cell rerun in a reused directory gets a
 # fresh W&B id: the checkpoint's wandb_run.json sidecar is read only on resume.
+# Every run is tagged with the pinned card's name (e.g. RTX5090) automatically.
 GPU=2 ./scripts/run_measured_sweep.sh --sweep scripts/sweeps/dreamer_optimisations_ablation.yaml
 
 # Comparison figures + rliable, via openrlbenchmark's own rlops CLI.

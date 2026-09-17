@@ -21,9 +21,10 @@ common:
   tag: dreamer-opt
   # One seed by default, because most rows here are pure-runtime: they measure
   # wall-clock, where a second seed buys run-to-run variance rather than a
-  # result. Rows whose claim is about SCORE override this with `seeds: [1, 2, 3]`
-  # — every `semantics_preserving: false` row, plus `baseline` and `combined`,
-  # which those rows are compared against.
+  # result. Rows whose claim is about SCORE override this with
+  # `seeds: [1, 2, 3, 4, 5]` — every `semantics_preserving: false` row, plus
+  # `baseline` and `combined`, which those rows are compared against. The one
+  # exception is `channels_last_amp_cudnn`, a single debugging run.
   seeds: [1]
   total_frames: 100_000
   overrides:
@@ -41,7 +42,7 @@ runs:
     semantics_preserving: true
     # The reference every other row is quoted against, so it needs the seeds
     # of the most demanding of them.
-    seeds: [1, 2, 3]
+    seeds: [1, 2, 3, 4, 5]
     experiment: dreamer/atari100k
     overrides:
       - exp_name=dreamer_ablation_baseline
@@ -60,6 +61,9 @@ runs:
     label: "torch.compile"
     axis: network
     semantics_preserving: true
+    # `true` = torch.compile's default mode, as in BBF's row. Unlike BBF, only
+    # the update step (`_cal_grad`: losses + backward) is compiled; acting
+    # (`act`) and the optimiser step stay eager.
     experiment: dreamer/atari100k
     overrides:
       - exp_name=dreamer_ablation_compile
@@ -76,9 +80,10 @@ runs:
   amp_fp16:
     label: "Mixed precision (fp16 + GradScaler)"
     axis: network
-    seeds: [1, 2, 3]
+    seeds: [1, 2, 3, 4, 5]
     # r2dreamer's scheme: fp16's 5-bit exponent underflows, so the scaling is required.
     semantics_preserving: false
+    enabled: false
     experiment: dreamer/atari100k
     overrides:
       - exp_name=dreamer_ablation_amp_fp16
@@ -95,7 +100,7 @@ runs:
   amp_bf16:
     label: "Mixed precision (bf16)"
     axis: network
-    seeds: [1, 2, 3]
+    seeds: [1, 2, 3, 4, 5]
     # Official DreamerV3's scheme: bf16 autocast, no gradient scaling.
     semantics_preserving: false
     experiment: dreamer/atari100k
@@ -116,6 +121,7 @@ runs:
     axis: network
     semantics_preserving: true
     experiment: dreamer/atari100k
+    enabled: false
     overrides:
       - exp_name=dreamer_ablation_static_pad
       - algorithm.dreamer_config.compile=false
@@ -148,10 +154,36 @@ runs:
       - algorithm.dreamer_config.perf.channels_last=true
       - algorithm.buffer_config.pin_memory=false
 
+  channels_last_amp_cudnn:
+    label: "Channels-last + fp16 + cuDNN benchmark"
+    axis: network
+    # One debugging run for channels_last, not a result row: checks whether it
+    # pays off where cuDNN's NHWC kernels are tuned (fp16 autocast, benchmarked
+    # algorithm choice), since the f32 `channels_last` row came out slower than
+    # the baseline in the earlier (archived) sweep. Its `amp_fp16` and
+    # `cudnn_benchmark` references are disabled, so the gain cannot be split
+    # between the three knobs. fp16 changes numerics, hence not
+    # semantics-preserving.
+    seeds: [1]
+    semantics_preserving: false
+    experiment: dreamer/atari100k
+    overrides:
+      - exp_name=dreamer_ablation_channels_last_amp_cudnn
+      - algorithm.dreamer_config.compile=false
+      - algorithm.dreamer_config.perf.amp=fp16
+      - algorithm.dreamer_config.perf.static_pad=false
+      - algorithm.dreamer_config.perf.dedup_value=false
+      - algorithm.dreamer_config.perf.cudnn_benchmark=true
+      - algorithm.dreamer_config.perf.tf32=false
+      - algorithm.dreamer_config.perf.foreach_laprop=false
+      - algorithm.dreamer_config.perf.channels_last=true
+      - algorithm.buffer_config.pin_memory=false
+
   cudnn_benchmark:
     label: "cuDNN benchmark"
     axis: network
     semantics_preserving: true
+    enabled: false
     experiment: dreamer/atari100k
     overrides:
       - exp_name=dreamer_ablation_cudnn_benchmark
@@ -169,6 +201,7 @@ runs:
     label: "TF32 matmuls"
     axis: network
     semantics_preserving: true
+    enabled: false
     experiment: dreamer/atari100k
     overrides:
       - exp_name=dreamer_ablation_tf32
@@ -187,6 +220,7 @@ runs:
     label: "Deduplicated value forward"
     axis: network
     semantics_preserving: true
+    enabled: false
     experiment: dreamer/atari100k
     overrides:
       - exp_name=dreamer_ablation_dedup_value
@@ -204,6 +238,7 @@ runs:
     label: "Batched LaProp step"
     axis: network
     semantics_preserving: true
+    enabled: false
     experiment: dreamer/atari100k
     overrides:
       - exp_name=dreamer_ablation_foreach_laprop
@@ -255,35 +290,17 @@ runs:
       - algorithm.buffer_config.pin_memory=false
       - algorithm.buffer_config.storage_device=cuda
 
-  no_online:
-    label: "No online sampling"
-    axis: data
-    seeds: [1, 2, 3]
-    # The buffer's only sampling knob: it changes which segments the learner
-    # sees, not how fast it sees them.
-    semantics_preserving: false
-    experiment: dreamer/atari100k
-    overrides:
-      - exp_name=dreamer_ablation_no_online
-      - algorithm.dreamer_config.compile=false
-      - algorithm.dreamer_config.perf.amp=off
-      - algorithm.dreamer_config.perf.static_pad=false
-      - algorithm.dreamer_config.perf.dedup_value=false
-      - algorithm.dreamer_config.perf.cudnn_benchmark=false
-      - algorithm.dreamer_config.perf.tf32=false
-      - algorithm.dreamer_config.perf.foreach_laprop=false
-      - algorithm.dreamer_config.perf.channels_last=false
-      - algorithm.buffer_config.pin_memory=false
-      - algorithm.buffer_config.online=false # Added
-
   batch32:
     label: "Replay batch 32"
     axis: network
-    seeds: [1, 2, 3]
+    seeds: [1, 2, 3, 4, 5]
     # The replay batch is not a pure runtime knob: it changes the gradient and
     # would need the learning rate rescaled to stay comparable. Measured, not
     # recommended.
     semantics_preserving: false
+    # DECLARED BUT NOT RUN. Out of memory with every memory-saving knob off:
+    # it died on both the RTX 3090 (24 GB) and the RTX 5090 (32 GB) hosts.
+    enabled: false
     experiment: dreamer/atari100k
     overrides:
       - exp_name=dreamer_ablation_batch32
@@ -301,7 +318,7 @@ runs:
   batch8:
     label: "Replay batch 8"
     axis: network
-    seeds: [1, 2, 3]
+    seeds: [1, 2, 3, 4, 5]
     semantics_preserving: false
     experiment: dreamer/atari100k
     overrides:
@@ -320,7 +337,7 @@ runs:
   train_ratio512:
     label: "Train ratio 512"
     axis: data
-    seeds: [1, 2, 3]
+    seeds: [1, 2, 3, 4, 5]
     semantics_preserving: false
     # DECLARED BUT NOT RUN. `train_ratio` is replayed frames per env step, so
     # 512 is 4x the committed 128 and roughly 4x the baseline's runtime — half
@@ -346,8 +363,9 @@ runs:
     label: "Combined (all runtime tweaks on)"
     axis: ""
     semantics_preserving: true
+    enabled: false
     # The headline claim of the sweep, so it carries the score seeds too.
-    seeds: [1, 2, 3]
+    seeds: [1, 2, 3, 4, 5]
     # Every tweak at once. The committed defaults leave every tweak off, so
     # they are all switched on explicitly here. Fill it in from the
     # stage-1 table instead if you want the stricter rule — only

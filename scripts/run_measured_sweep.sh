@@ -26,8 +26,8 @@
 #   --sweep FILE    one sweep YAML from scripts/sweeps/; repeat to combine
 #   --only SUBSTR   comma-separated substrings of job names
 #   --seeds LIST    comma-separated seeds, overriding the sweep files
-#   --tag NAME      extra W&B tag; added alongside "measured" and the
-#                   sweep file's own `common.tag`
+#   --tag NAME      extra W&B tag; added alongside "measured", the sweep
+#                   file's own `common.tag` and the card's name (e.g. RTX5090)
 #   --online        log to W&B live instead of offline (see below)
 #   --no-sync       keep the offline runs local; never upload
 #   --dry-run       print the commands and exit
@@ -158,17 +158,28 @@ TIMINGS="$MEASURED_DIR/timings.tsv"
 "$PYTHON" scripts/jobs.py "${SWEEP_ARGS[@]}" \
   ${ONLY:+--only "$ONLY"} ${SEEDS:+--seeds "$SEEDS"} > "$JOBS_TSV" || exit 1
 
-# Tags accumulate: the runner's own, the sweep's `common.tag`, and `--tag`.
+# Tags accumulate: the runner's own, the sweep's `common.tag`, `--tag`, and the
+# pinned card's name.
 add_tag() {
   local t=$1
   [[ -z "$t" ]] && return 0
   case ",$RUN_TAGS," in *",$t,"*) return 0 ;; esac
   RUN_TAGS="${RUN_TAGS:+$RUN_TAGS,}$t"
 }
+# The card's name as a tag, e.g. "NVIDIA GeForce RTX 5090" -> "RTX5090", so a
+# wall-clock number can always be traced to its hardware. Empty without
+# nvidia-smi; characters outside [A-Za-z0-9_.-] would break the tag list.
+gpu_tag() {
+  command -v nvidia-smi >/dev/null 2>&1 || return 0
+  nvidia-smi --id="$GPU" --query-gpu=name --format=csv,noheader 2>/dev/null \
+    | head -n 1 | sed -e 's/^NVIDIA //' -e 's/^GeForce //' | tr -cd 'A-Za-z0-9_.-'
+}
+
 RUN_TAGS=""
 add_tag "measured"
 add_tag "$SWEEP_TAG"
 add_tag "$TAG"
+add_tag "$(gpu_tag)"
 
 # Upload whatever offline runs sit under $1. Called after each cell so a sweep
 # that runs for a day puts its results on W&B as it goes rather than holding
