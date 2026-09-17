@@ -173,8 +173,9 @@ add_tag "$TAG"
 # Upload whatever offline runs sit under $1. Called after each cell so a sweep
 # that runs for a day puts its results on W&B as it goes rather than holding
 # them hostage to the last row, and once more at the end to catch stragglers.
-# `wandb sync` on an already-uploaded directory is a no-op, which is what makes
-# both the repeat call and a resumed sweep safe.
+# Runs already carrying wandb's `.synced` marker are skipped here: given an
+# explicit path, `wandb sync` re-uploads regardless of that marker, so without
+# the check every repeat call and every resumed sweep would push old runs again.
 sync_runs() {  # dir
   ((ONLINE == 0 && NO_SYNC == 0)) || return 0
   local wandb_bin=".venv/bin/wandb"
@@ -184,8 +185,12 @@ sync_runs() {  # dir
   local runs=("$1"/wandb/offline-run-*)
   set -f
   [[ -e "${runs[0]}" ]] || return 0
-  local run
+  local run marker
   for run in "${runs[@]}"; do
+    set +f
+    marker=("$run"/*.wandb.synced)
+    set -f
+    [[ -e "${marker[0]}" ]] && continue
     "$wandb_bin" sync "$run" >/dev/null 2>&1 || echo "  sync failed: $run" >&2
   done
 }
@@ -211,6 +216,10 @@ build_cmd() {  # name seed overrides
 if ((DRY_RUN)); then
   echo "GPU $GPU: ${used} MiB used, ${util}% utilisation | ${THREADS} threads | tags=$RUN_TAGS"
   while IFS=$'\t' read -r name seed overrides; do
+    if [[ -f "$MEASURED_DIR/done/${name}-seed${seed}.done" ]]; then
+      echo "SKIP   ${name}-seed${seed} (already done)"
+      continue
+    fi
     echo
     echo "# [$name seed=$seed]"
     echo "CUDA_VISIBLE_DEVICES=$GPU $(build_cmd "$name" "$seed" "$overrides")"

@@ -30,7 +30,7 @@ runs:
     label: "Baseline (published BBF, RR2)"
     axis: ""
     semantics_preserving: true
-    seeds: [1, 2, 3]
+    seeds: [1, 2, 3, 4, 5]
     experiment: bbf/atari100k
     overrides:
       - exp_name=bbf_ablation_baseline
@@ -66,7 +66,7 @@ runs:
   batch64:
     label: "Optimisation batch 64"
     axis: network
-    seeds: [1, 2, 3]
+    seeds: [1, 2, 3, 4, 5]
     # The optimisation batch is not a pure runtime knob: it changes the gradient
     # and would need the learning rate rescaled to stay comparable. Measured,
     # not recommended.
@@ -79,7 +79,7 @@ runs:
   batch16:
     label: "Optimisation batch 16"
     axis: network
-    seeds: [1, 2, 3]
+    seeds: [1, 2, 3, 4, 5]
     semantics_preserving: false
     experiment: bbf/atari100k
     overrides:
@@ -108,7 +108,7 @@ runs:
   uniform:
     label: "Uniform replay (no PER)"
     axis: data
-    seeds: [1, 2, 3]
+    seeds: [1, 2, 3, 4, 5]
     # Changes which transitions the learner sees.
     semantics_preserving: false
     experiment: bbf/atari100k
@@ -119,7 +119,7 @@ runs:
   rr8:
     label: "Replay ratio 8"
     axis: data
-    seeds: [1, 2, 3]
+    seeds: [1, 2, 3, 4, 5]
     semantics_preserving: false
     # DECLARED BUT NOT RUN. At ~4x the baseline this single row is ~12 h, close
     # to half the sweep, for a dagger row whose runtime cost is not in doubt.
@@ -136,7 +136,7 @@ runs:
     label: "Combined"
     axis: ""
     semantics_preserving: true
-    seeds: [1, 2, 3]
+    seeds: [1, 2, 3, 4, 5]
     # Fill the overrides in from the measured table
     enabled: false
     experiment: bbf/atari100k

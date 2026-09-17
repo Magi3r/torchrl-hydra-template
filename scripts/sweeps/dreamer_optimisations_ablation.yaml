@@ -8,10 +8,10 @@
 # machine. Run it with run_measured_sweep.sh, never run_sweep.sh — a parallel
 # neighbour on another card still shares this host's CPU and PCIe.
 #
-# BASELINE IS EVERYTHING OFF. The committed defaults follow r2dreamer (compile,
-# tf32, fp16 amp, pin_memory and channels_last on; this port's additions off), so every row spells out
-# every flag instead of relying on them: the baseline switches all off and each
-# row switches exactly one back on.
+# BASELINE IS EVERYTHING OFF, which is also the committed default. Every row
+# still spells out every flag instead of relying on it, so the sweep stays
+# valid if a default changes: the baseline switches all off and each row
+# switches exactly one back on.
 # So a tweak that earns its keep shows up as a NEGATIVE delta.
 
 common:
@@ -348,8 +348,8 @@ runs:
     semantics_preserving: true
     # The headline claim of the sweep, so it carries the score seeds too.
     seeds: [1, 2, 3]
-    # Every tweak at once. The committed defaults leave this port's additions
-    # off, so they are all switched on explicitly here. Fill it in from the
+    # Every tweak at once. The committed defaults leave every tweak off, so
+    # they are all switched on explicitly here. Fill it in from the
     # stage-1 table instead if you want the stricter rule — only
     # semantics-preserving rows that beat the baseline by more than run-to-run
     # variation — in which case `amp` and the two batch rows are ineligible.

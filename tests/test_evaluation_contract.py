@@ -305,6 +305,25 @@ def test_wandb_logger_resumes_from_sidecar(fake_wandb, tmp_path):
     assert fake_wandb.init_kwargs["resume"] == "must"
 
 
+def test_wandb_logger_ignores_stale_sidecar_without_resume(fake_wandb, tmp_path):
+    """A fresh run in a reused output dir must not adopt the previous run's id.
+
+    Otherwise its offline upload merges into that older run on the server.
+    """
+    import json
+
+    from src.callbacks.logger import WandBLogger
+
+    sidecar = tmp_path / "wandb_run.json"
+    sidecar.write_text(json.dumps({"id": "stale-run", "project": "p", "entity": None}))
+
+    logger = WandBLogger(mode="offline", run_id_file=str(sidecar))
+    logger.on_train_start({"cfg": None})
+
+    assert fake_wandb.init_kwargs["id"] is None
+    assert json.loads(sidecar.read_text())["id"] == "abc123"
+
+
 def test_wandb_logger_refuses_to_resume_without_an_id(fake_wandb, tmp_path):
     from src.callbacks.logger import WandBLogger
 

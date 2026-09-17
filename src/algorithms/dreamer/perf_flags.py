@@ -39,17 +39,16 @@ AMP_MODES = ("bf16", "fp16", "off")
 
 @dataclasses.dataclass
 class PerfFlags:
-    # Defaults match NM512/r2dreamer (tf32 on, fp16 autocast + GradScaler);
-    # this port's own additions are off. Mirrors configs/algorithm/dreamer.yaml.
+    # All off by default, like BBF's runtime knobs; the Dreamer README lists
+    # the combination that roughly matches NM512/r2dreamer.
+    # Mirrors configs/algorithm/dreamer.yaml.
     static_pad: bool = False
     dedup_value: bool = False
     cudnn_benchmark: bool = False
-    tf32: bool = True
-    amp: str = "fp16"
+    tf32: bool = False
+    amp: str = "off"
     foreach_laprop: bool = False
-    # On: r2dreamer parity, not an addition — its permute ran every conv
-    # activation NHWC; off leaves this port's first encoder conv NCHW.
-    channels_last: bool = True
+    channels_last: bool = False
 
 
 # Module-level singleton read by networks.py / rssm.py / model/dreamerv3.py /

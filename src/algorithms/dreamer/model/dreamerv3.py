@@ -150,9 +150,9 @@ class DreamerV3(nn.Module):
             if perf_flags.flags.tf32:
                 torch.set_float32_matmul_precision("high")
         if config.compile:
-            # compile: true -> "reduce-overhead"; or pass a torch.compile mode
-            # string directly (e.g. "max-autotune") for A/B testing.
-            mode = config.compile if isinstance(config.compile, str) else "reduce-overhead"
+            # compile: true -> torch.compile's "default" mode; or pass a mode
+            # string directly ("reduce-overhead", "max-autotune", ...).
+            mode = config.compile if isinstance(config.compile, str) else "default"
             print(f"Compiling update function with torch.compile (mode={mode})...", flush=True)
             self._cal_grad = torch.compile(self._cal_grad, mode=mode)
             self._compiled = True

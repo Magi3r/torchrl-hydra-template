@@ -69,14 +69,13 @@ runtime knobs -- `compile`, `amp`, `channels_last`, `pin_memory` and
 configuration; `compile` wraps the network entry points rather than `_update`,
 whose annealed discount and horizon would otherwise force a recompile on every
 gradient step.
-DreamerV3's speed knobs default to NM512/r2dreamer's settings, the upstream
-this port is based on: `dreamer_config.compile`, `perf.tf32`, `perf.amp: fp16`
-(autocast + `GradScaler`), `buffer_config.pin_memory` and `perf.channels_last`
-are on; this port's own additions (`perf.static_pad`, `perf.dedup_value`,
-`perf.cudnn_benchmark`, `perf.foreach_laprop`) are off. `channels_last` is on
-for parity — r2dreamer's input permute already ran every conv activation NHWC,
-while this port's NCHW TorchRL input would leave the first encoder conv NCHW —
-and mirrors BBF's knob: NHWC conv weights (converted once in
+DreamerV3's speed knobs are all off by default, like BBF's:
+`dreamer_config.compile` (`false`; `true` means torch.compile's `default` mode,
+any string is passed through as the mode), `buffer_config.pin_memory` and every
+`dreamer_config.perf.*` flag (`amp: "off"`). The Dreamer README lists the
+combination that roughly matches NM512/r2dreamer (`compile: reduce-overhead`,
+`perf.tf32`, `perf.amp: fp16`, `pin_memory`, `perf.channels_last`).
+`perf.channels_last` mirrors BBF's knob: NHWC conv weights (converted once in
 `DreamerV3.__init__`, before `clone_and_freeze` aliases parameter storage) plus
 an NHWC encoder input. Keep `PerfFlags` in `perf_flags.py` in sync
 with `configs/algorithm/dreamer.yaml`.
@@ -688,8 +687,10 @@ python scripts/update_algo_results.py              # refresh algo README benchma
 
 # run_measured_sweep.sh: the same sweep files, run SERIALLY on one pinned idle
 # GPU, because wall-clock measured against a parallel neighbour is not a
-# measurement. Timings land in logs/measured/timings.tsv; runs log to W&B
-# offline and are uploaded when the sweep finishes.
+# measurement. Timings land in logs/measured/<sweep tag>/timings.tsv; runs log
+# to W&B offline and each is uploaded as its cell finishes (runs already marked
+# `.synced` are never re-uploaded). A cell rerun in a reused directory gets a
+# fresh W&B id: the checkpoint's wandb_run.json sidecar is read only on resume.
 GPU=2 ./scripts/run_measured_sweep.sh --sweep scripts/sweeps/dreamer_optimisations_ablation.yaml
 
 # Comparison figures + rliable, via openrlbenchmark's own rlops CLI.

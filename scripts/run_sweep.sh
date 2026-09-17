@@ -114,6 +114,7 @@ queued=0
 skipped=0
 while IFS=$'\t' read -r name seed overrides; do
   if [[ -f "$SWEEP_DIR/done/${name}-seed${seed}.done" ]]; then
+    echo "SKIP   ${name}-seed${seed} (already done)"
     skipped=$((skipped + 1))
     continue
   fi
