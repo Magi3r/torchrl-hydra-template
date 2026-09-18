@@ -63,7 +63,22 @@ BBF (`algorithm=bbf`) builds on the same Atari-100k stack but subclasses
 `PrioritizedSliceSampler` for contiguous-window sampling (n-step computed at
 sample time), adding SPR self-prediction, an Impala-CNN ×4 encoder, periodic
 shrink-and-perturb resets, annealed n-step/discount, DrQ augmentation and an EMA
-target. It requires `trainer.num_envs=1` (a single contiguous stream).
+target. It requires `trainer.num_envs=1` (a single contiguous stream). Its
+runtime knobs -- `compile`, `amp`, `channels_last`, `pin_memory` and
+`storage_device` -- all default to off, so the defaults are the published
+configuration; `compile` wraps the network entry points rather than `_update`,
+whose annealed discount and horizon would otherwise force a recompile on every
+gradient step.
+DreamerV3's speed knobs are all off by default, like BBF's:
+`dreamer_config.compile` (`false`; `true` means torch.compile's `default` mode,
+any string is passed through as the mode), `buffer_config.pin_memory` and every
+`dreamer_config.perf.*` flag (`amp: "off"`). The Dreamer README lists the
+combination that roughly matches NM512/r2dreamer (`compile: reduce-overhead`,
+`perf.tf32`, `perf.amp: fp16`, `pin_memory`, `perf.channels_last`).
+`perf.channels_last` mirrors BBF's knob: NHWC conv weights (converted once in
+`DreamerV3.__init__`, before `clone_and_freeze` aliases parameter storage) plus
+an NHWC encoder input. Keep `PerfFlags` in `perf_flags.py` in sync
+with `configs/algorithm/dreamer.yaml`.
 
 ## Design principles
 
@@ -660,11 +675,24 @@ python src/train.py experiment=tdmpc2/dmc environment.task=walker-walk
 
 python scripts/update_algo_results.py              # refresh algo README benchmark tables (W&B tag: template)
 
-# Cross-algorithm sweep: 6 experiments x 3 seeds, queue-balanced over GPUs.
-# Resumable (markers in logs/benchmarks/done/); tags runs `template`.
-./scripts/run_benchmarks.sh --dry-run              # print the 18 commands
-./scripts/run_benchmarks.sh --smoke                # tiny budgets; validates every spec
-./scripts/run_benchmarks.sh --gpus 2,3             # the real sweep
+# Sweeps are declared in scripts/sweeps/*.yaml (one file = one sweep) and
+# expanded by scripts/jobs.py. `--sweep` repeats to combine several files.
+#
+# run_sweep.sh: queue-balanced over GPUs, for getting runs *finished*.
+# Resumable (markers in logs/sweeps/done/); tags runs `template`.
+./scripts/run_sweep.sh --dry-run              # print the 18 commands
+./scripts/run_sweep.sh --smoke                # tiny budgets; validates every spec
+./scripts/run_sweep.sh --gpus 2,3             # the real sweep
+./scripts/run_sweep.sh --sweep scripts/sweeps/dreamer_optimisations_ablation.yaml
+
+# run_measured_sweep.sh: the same sweep files, run SERIALLY on one pinned idle
+# GPU, because wall-clock measured against a parallel neighbour is not a
+# measurement. Timings land in logs/measured/<sweep tag>/timings.tsv; runs log
+# to W&B offline and each is uploaded as its cell finishes (runs already marked
+# `.synced` are never re-uploaded). A cell rerun in a reused directory gets a
+# fresh W&B id: the checkpoint's wandb_run.json sidecar is read only on resume.
+# Every run is tagged with the pinned card's name (e.g. RTX5090) automatically.
+GPU=2 ./scripts/run_measured_sweep.sh --sweep scripts/sweeps/dreamer_optimisations_ablation.yaml
 
 # Comparison figures + rliable, via openrlbenchmark's own rlops CLI.
 # First run builds an isolated .venv-openrlbenchmark; output in logs/analysis/.

@@ -67,7 +67,10 @@ class WandBLogger:
     def _read_run_id(self) -> str | None:
         if self.run_id is not None:
             return self.run_id
-        if not self.run_id_file:
+        # Only a resume may adopt a stale sidecar. A fresh run in a reused
+        # output directory would otherwise take over the previous run's id, and
+        # its (offline) upload would merge into that run on the server.
+        if self.resume is None or not self.run_id_file:
             return None
         path = Path(self.run_id_file)
         if not path.exists():

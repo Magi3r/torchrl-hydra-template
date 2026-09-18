@@ -317,6 +317,8 @@ class ConvEncoder(nn.Module):
 
         self.out_dim = self.depths[-1] * h * w
         self.layers = nn.Sequential(*layers)
+        # Conv weights are converted to NHWC once, in DreamerV3.__init__.
+        self._channels_last = perf_flags.flags.channels_last
 
     def forward(self, obs):
         """Encode image-like observations with a CNN."""
@@ -325,6 +327,11 @@ class ConvEncoder(nn.Module):
         # (B*T, C, H, W)
         x = obs.reshape(-1, *obs.shape[-3:])
         # already channel-first; no permute needed  #! R2Dreamer had `x = x.permute(0, 3, 1, 2)` here
+        # That permute made R2Dreamer's input NHWC in memory. Without it only the
+        # first conv + pool run NCHW (RMSNorm2D's permute switches the rest), so
+        # this restores the upstream layout for that one layer.
+        if self._channels_last:
+            x = x.contiguous(memory_format=torch.channels_last)
         # (B*T, C_feat, H_feat, W_feat)
         x = self.layers(x)
         # (B*T, C_feat*H_feat*W_feat)
@@ -409,7 +416,8 @@ class ConvDecoder(nn.Module):
         # Combine and upsample
         # (B*T, H_feat, W_feat, C_feat)
         x = self.sp_norm(x0 + x1)
-        # (B*T, C_feat, H_feat, W_feat)
+        # (B*T, C_feat, H_feat, W_feat) — NHWC in memory, so the conv stack
+        # already runs channels-last activations with or without perf.channels_last
         x = x.permute(0, 3, 1, 2)
         x = self.layers(x)  # Upsamples to original H, W; output is (B*T, C, H, W)
         x = torch.sigmoid(

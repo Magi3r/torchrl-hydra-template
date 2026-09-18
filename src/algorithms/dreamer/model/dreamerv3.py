@@ -88,6 +88,12 @@ class DreamerV3(nn.Module):
         # Phase 1: subclass builds its extra components (decoder / projector / prototypes)
         self._init_extra(config, shapes)
 
+        # NHWC conv weights, once, for every conv the model owns (decoder and
+        # DreamerPro's EMA encoder included). Must precede clone_and_freeze:
+        # `.to()` rebinds `param.data`, which would break its storage sharing.
+        if perf.channels_last:
+            self.to(memory_format=torch.channels_last)
+
         # Phase 2: collect everything into one shared optimiser
         modules = self._build_module_dict()
         for key, module in modules.items():
@@ -144,9 +150,9 @@ class DreamerV3(nn.Module):
             if perf_flags.flags.tf32:
                 torch.set_float32_matmul_precision("high")
         if config.compile:
-            # compile: true -> "reduce-overhead"; or pass a torch.compile mode
-            # string directly (e.g. "max-autotune") for A/B testing.
-            mode = config.compile if isinstance(config.compile, str) else "reduce-overhead"
+            # compile: true -> torch.compile's "default" mode; or pass a mode
+            # string directly ("reduce-overhead", "max-autotune", ...).
+            mode = config.compile if isinstance(config.compile, str) else "default"
             print(f"Compiling update function with torch.compile (mode={mode})...", flush=True)
             self._cal_grad = torch.compile(self._cal_grad, mode=mode)
             self._compiled = True

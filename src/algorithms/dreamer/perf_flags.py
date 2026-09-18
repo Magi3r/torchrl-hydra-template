@@ -1,16 +1,18 @@
 """Process-wide toggles for the Dreamer speed optimisations.
 
 ``configure()`` is called once per ``DreamerV3.__init__`` (before any
-submodule is constructed — ``static_pad`` is read at ``nn.Module.__init__``
-time) and fully replaces the previous flag state from defaults, so two models
-built in the same process (tests, Hydra multirun) never leak flags from one
-config into the other.
+submodule is constructed — ``static_pad`` and ``channels_last`` are read at
+``nn.Module.__init__`` time) and fully replaces the previous flag state from
+defaults, so two models built in the same process (tests, Hydra multirun)
+never leak flags from one config into the other.
 
 ``static_pad``, ``dedup_value``, ``cudnn_benchmark``, ``tf32`` and
 ``foreach_laprop`` are exact optimisations — flipping them off reproduces
 bit-identical numerics, just slower (``foreach_laprop`` verified by
-``tests/test_laprop.py``). ``amp`` is the one that changes numerics; it picks
-the mixed-precision scheme:
+``tests/test_laprop.py``). ``channels_last`` is exact up to cuDNN kernel
+selection (NHWC and NCHW kernels may differ in the last bits, as different
+``cudnn_benchmark`` picks do; ``tests/test_dreamer_channels_last.py``).
+``amp`` is the one that changes numerics; it picks the mixed-precision scheme:
 
 - ``bf16`` — bfloat16 autocast, no gradient scaling (official DreamerV3).
 - ``fp16`` — float16 autocast + ``GradScaler`` (r2dreamer parity). fp16's
@@ -37,12 +39,16 @@ AMP_MODES = ("bf16", "fp16", "off")
 
 @dataclasses.dataclass
 class PerfFlags:
-    static_pad: bool = True
-    dedup_value: bool = True
-    cudnn_benchmark: bool = True
-    tf32: bool = True
-    amp: str = "bf16"
-    foreach_laprop: bool = True
+    # All off by default, like BBF's runtime knobs; the Dreamer README lists
+    # the combination that roughly matches NM512/r2dreamer.
+    # Mirrors configs/algorithm/dreamer.yaml.
+    static_pad: bool = False
+    dedup_value: bool = False
+    cudnn_benchmark: bool = False
+    tf32: bool = False
+    amp: str = "off"
+    foreach_laprop: bool = False
+    channels_last: bool = False
 
 
 # Module-level singleton read by networks.py / rssm.py / model/dreamerv3.py /
